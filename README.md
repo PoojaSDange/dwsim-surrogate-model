@@ -1,44 +1,64 @@
-## 1. Folder structure
+# Surrogate Modeling for Distillation Column Optimization
+
+Machine learning surrogate models trained to replace expensive DWSIM process simulations for a Benzene–Toluene binary distillation column. The project automates dataset generation across varied operating conditions and benchmarks four model classes to predict four process outputs (distillate purity, bottoms purity, condenser duty, reboiler duty) — selecting the best model **independently for each output** rather than assuming one model fits all targets equally well.
+
+## Why this project is more than "train a regression model"
+
+Running a full DWSIM simulation for every operating condition is slow. The goal here is to train a fast ML surrogate that approximates DWSIM's output well enough to use for optimization/exploration without running the actual simulator every time.
+
+The interesting engineering problem showed up *after* the models were trained: **accuracy-only model selection was misleading.** A model could score well on standard error metrics while still producing predictions that violate basic physical constraints — for example, a purity value outside [0, 1), or a negative duty magnitude, both of which are physically meaningless for this system.
+
+So instead of picking the "best" model purely by lowest error, this project adds a **physical-consistency audit layer**: predictions are checked against known physical bounds, and a model is disqualified for a given target if more than 0.5% of its test-set predictions violate those bounds (with a small numerical tolerance for boundary crossings, since unconstrained regressors will sometimes land just outside a hard boundary). Only models that are both accurate *and* physically valid are selected.
+
+## Approach
+
+1. **Simulation** — Built and converged a Benzene–Toluene binary distillation column flowsheet in DWSIM.
+2. **Automated data generation** — Used DWSIM.Automation (C#) to drive DWSIM headlessly across 3,000 Latin Hypercube-sampled operating conditions (8 input dimensions), producing a labeled dataset without manual re-simulation for every case.
+3. **Model training** — Trained and benchmarked 4 model classes (Polynomial Ridge, Random Forest, XGBoost, ANN) independently per target variable (distillate purity, bottoms purity, condenser duty, reboiler duty).
+4. **Physical-consistency audit** — Screened candidate models against physical validity bounds before final selection, not just accuracy metrics.
+5. **Model selection** — Selected the best model per output based on both accuracy and physical consistency.
+
+## Results
+
+Full results, metrics tables, and per-target model comparisons are in [`Report.docx`](./Report.docx) and [`Results_Summary.docx`](./Results_Summary.docx) — those documents are the source of truth for numbers; this README intentionally doesn't duplicate them.
+
+## Tech stack
+
+Python, Pandas, NumPy, Matplotlib, Seaborn, scikit-learn, XGBoost, DWSIM, C# (DWSIM.Automation)
+
+## Repo structure
 
 ```
-Submission/
-├── README.md                          <- this file
-├── Report.pdf
-├── Results_Summary.docx               (or .pdf)
-├── Dataset.csv                        <- 2,988 rows, 12 columns (8 inputs + 4 targets)
-├──  simulation.dwxmz               <- DWSIM flowsheet
-|----simulation.ipynb               <- .ipynb file 
-|── DataGeneration/                <- C# console app (DWSIM Automation)
-       ├── Program.cs
-       └── DWSIMAutomation.csproj      
-
+├── README.md                    <- this file
+├── Report.docx                  <- full technical report
+├── Results_Summary.docx         <- condensed results summary
+├── Dataset Generation/          <- C# console app (DWSIM Automation)
+│   ├── Program.cs
+│   └── DWSIMAutomation.csproj
+├── dwsim_dataset.csv            <- 2,988 rows, 12 columns (8 inputs + 4 targets)
+├── simulation.dwxmz             <- DWSIM flowsheet
+└── surrogate_model.ipynb        <- ML training/evaluation notebook
 ```
 
-If your actual folder names differ from this, update the paths below to match before zipping.
+If your local folder names differ, update the paths below to match before running anything.
 
----
+## Reproducing this project
 
-## 2. Opening the DWSIM flowsheet
+### 1. Opening the DWSIM flowsheet
 
-1. Install DWSIM (version used for this submission): 10.1.9707
-2. Open `Simulation/simulation.dwxmz` directly in the DWSIM GUI (File → Open).
-3. You can inspect or manually re-run a single case in the GUI (set feed conditions, column specs, then Calculate) to sanity-check the flowsheet before running the full automated batch.
+Install DWSIM (version used for this submission: 10.1.9707). Open `simulation.dwxmz` directly in the DWSIM GUI (File → Open). You can inspect or manually re-run a single case in the GUI (set feed conditions, column specs, then Calculate) to sanity-check the flowsheet before running the full automated batch.
 
----
+### 2. Regenerating the dataset (DWSIM Automation, C#)
 
-## 3. Regenerating the dataset (DWSIM Automation, C#)
+The dataset was generated by `Dataset Generation/Program.cs`, which drives DWSIM headlessly via `DWSIM.Automation.Automation3` and writes `dwsim_dataset.csv`.
 
-- The dataset was generated by `Code/DataGeneration/Program.cs`, which drives DWSIM headlessly via `DWSIM.Automation.Automation3` and writes `dwsim_dataset.csv`.
-- To generate the dataset, open DWSIMAutomation.slnx in Visual studio and run Program.cs
-
-### 3.1 Requirements
+**Requirements:**
 - .NET SDK (matching the DWSIM Automation DLLs you have installed)
 - A local DWSIM installation
 
-### 3.2 Environment setup
-Set an environment variable pointing to your DWSIM installation folder (the one containing `DWSIM.Automation.dll` and the `ThermoCS` subfolder):
+**Environment setup** — set an environment variable pointing to your DWSIM installation folder (the one containing `DWSIM.Automation.dll` and the `ThermoCS` subfolder):
 
-```bash
+```powershell
 # Windows (PowerShell)
 $env:DWSIM_PATH = "C:\Program Files\DWSIM"
 
@@ -48,8 +68,7 @@ export DWSIM_PATH=/path/to/DWSIM
 
 The program throws immediately at startup if `DWSIM_PATH` is not set — this is intentional, so a missing environment variable fails loudly instead of silently pointing at the wrong DWSIM install.
 
-### 3.3 Run
-From the `Code/DataGeneration/` folder:
+**Run** — from the `Dataset Generation/` folder:
 
 ```bash
 dotnet build
@@ -57,61 +76,44 @@ dotnet run
 ```
 
 The program:
-- Generates 3,000 Latin Hypercube samples across the 8 input dimensions (fixed `RANDOM_SEED = 42`, so re-running produces the identical sample set).
-- Loads a fresh copy of `simulation.dwxmz` for every case (so one case's state can't leak into the next).
-- Writes results to `dwsim_dataset.csv` in the project root, flushing after every successful row (safe to inspect progress mid-run).
-- Skips (and logs) any individual case that fails to converge or returns an invalid result, rather than aborting the whole batch — this is why the submitted dataset has 2,999 rows from 3,000 requested cases (1 failed case).
+- Generates 3,000 Latin Hypercube samples across the 8 input dimensions (fixed `RANDOM_SEED = 42`, so re-running produces the identical sample set)
+- Loads a fresh copy of `simulation.dwxmz` for every case (so one case's state can't leak into the next)
+- Writes results to `dwsim_dataset.csv`, flushing after every successful row (safe to inspect progress mid-run)
+- Skips (and logs) any individual case that fails to converge or returns an invalid result, rather than aborting the whole batch — this is why the submitted dataset has 2,999 rows from 3,000 requested cases (1 failed case)
 
 Expected console output ends with a summary block reporting requested/successful/failed case counts and the CSV output path.
 
 **Runtime:** DWSIM cases run sequentially; 3,000 cases will take a while (this depends on your machine — DWSIM's column solver is the bottleneck, not the automation code). Budget accordingly if re-running from scratch.
 
----
+### 3. Running the ML notebook (Python)
 
-## 4. Running the ML notebook (Python)
+**Requirements:**
 
-### 4.1 Requirements
-Python 3.x with:
+```bash
+pip install pandas numpy matplotlib seaborn scikit-learn xgboost scipy
 ```
-pandas
-numpy
-matplotlib
-seaborn
-scikit-learn
-xgboost
-scipy
-```
-(Install via `pip install pandas numpy matplotlib seaborn scikit-learn xgboost scipy`.)
 
-### 4.2 Run
-Open `surrogate_model.ipynb` and run all cells top to bottom (Restart & Run All). The notebook expects `dwsim_dataset.csv` to be in the same working directory.
-
+**Run** — open `surrogate_model.ipynb` and run all cells top to bottom (Restart & Run All). The notebook expects `dwsim_dataset.csv` to be in the same working directory.
 
 All model training uses `RANDOM_STATE = 42`, matching the seed used in the C# data generator, so re-running the notebook against the same dataset reproduces the same train/val/test split and (up to library-version differences) the same model results.
 
-**Runtime:** hyperparameter search (`GridSearchCV`/`RandomizedSearchCV`, 3-fold CV) across 4 model families × 4 targets is the slowest part of the notebook; expect it to take several minutes depending on your machine.
+**Runtime:** hyperparameter search (GridSearchCV/RandomizedSearchCV, 3-fold CV) across 4 model families × 4 targets is the slowest part of the notebook; expect it to take several minutes depending on your machine.
 
-### 4.3 What the notebook outputs
-- All comparison tables and plots referenced in `Report.pdf`
+**Output:** all comparison tables and plots referenced in `Report.docx`.
 
----
+### 4. Reproducing results end-to-end
 
-## 5. Reproducing the results end-to-end
+1. Set `DWSIM_PATH` and run the C# generator → produces `dwsim_dataset.csv` with the same 3,000 LHS samples as the submitted dataset (seed 42).
+2. Run the notebook against that CSV → produces the same train/val/test split (seed 42) and, subject to library-version differences, closely matching model metrics.
+3. Compare your regenerated metrics against the tables in `Report.docx` and `Results_Summary.docx` — small numerical differences (later decimal places) are expected if your DWSIM build, .NET runtime, or Python package versions differ from the original run; the qualitative conclusions (which model wins per target, which models get disqualified on physical grounds) should be stable.
 
-1. Set `DWSIM_PATH` and run the C# generator (Section 3) → produces `dwsim_dataset.csv` with the same 3,000 LHS samples as the submitted dataset (seed 42).
-2. Run the notebook (Section 4) against that CSV → produces the same train/val/test split (seed 42) and, subject to library-version differences, closely matching model metrics.
-3. Compare your regenerated metrics against the tables in `Report.pdf` Section 9 and `Results_Summary.docx` Section 2 — small numerical differences (in the later decimal places) are expected if your DWSIM build, .NET runtime, or Python package versions differ from the original run; the qualitative conclusions (which model wins per target, which models get disqualified on physical grounds) should be stable.
+## Assumptions
 
----
+Stated explicitly, as required by the original task guidelines:
 
-## 6. Assumptions
-
-These are stated explicitly, as required by the task guidelines:
-
-- **Component ordering:** the feed composition array is assumed to follow the flowsheet's component order `[benzene, toluene]` (index 0 = benzene, index 1 = toluene). Distillate purity (`xD`) is read as the benzene mole fraction in the distillate stream; bottoms purity (`xB`) is read as the toluene mole fraction in the bottoms stream.
-- **Duty sign convention:** condenser duty (`QC`) and reboiler duty (`QR`) are written to the dataset exactly as DWSIM reports them (raw signed values), not converted to absolute magnitude. This is intentional — the Python preprocessing pipeline (Report Section 5.1) screens for and removes physically invalid negative-duty rows downstream, which requires seeing the true sign. 11 of 2,999 written rows (≈0.4%) were removed at this stage for a negative reboiler duty.
-- **`feed_stage` sampling:** seven of the eight inputs (feed temperature, feed pressure, feed composition, reflux ratio, bottoms withdrawal rate, feed flow, number of stages) are sampled via Latin Hypercube Sampling. `feed_stage` is the exception: because its valid range (`2` to `number_of_stages − 1`) depends on the `number_of_stages` value already drawn for that row, it is instead sampled uniformly within that row-specific range after the LHS pass, rather than via a fixed-range LHS dimension.
-- **Column specification keys:** the automation code sets bottoms withdrawal rate via the column spec key `"R"` and reflux ratio via `"C"` — these are the spec-dictionary keys exposed by the DWSIM version and flowsheet configuration used for this submission. If you open the flowsheet in a different DWSIM version and these keys have changed, the program will fail with an explicit "specification key not found" error listing the actually-available keys, rather than failing silently.
-- **Physical validity bounds** applied during data preprocessing and model auditing: `xD, xB ∈ [0, 1)` (mole fractions); `QC, QR ≥ 0` (duty magnitudes). A small numerical tolerance (±0.02) is allowed on model *predictions* (not raw simulation data) for the purity bounds, since unconstrained regressors can make small boundary crossings; a model is disqualified if more than 0.5% of its test-set predictions violate this tolerance.
-- **Feed vapor phase mole fraction and column pressure** (listed as optional additional variables in the task brief) were not included as separate sampled inputs; column pressure is governed by the sampled feed pressure, and feed phase is determined by DWSIM's own flash calculation at the sampled feed temperature/pressure/composition rather than being manually specified.
-
+- **Component ordering:** feed composition array follows the flowsheet's component order [benzene, toluene] (index 0 = benzene, index 1 = toluene). Distillate purity (xD) is read as the benzene mole fraction in the distillate stream; bottoms purity (xB) is read as the toluene mole fraction in the bottoms stream.
+- **Duty sign convention:** condenser duty (QC) and reboiler duty (QR) are written to the dataset exactly as DWSIM reports them (raw signed values), not converted to absolute magnitude. This is intentional — the Python preprocessing pipeline screens for and removes physically invalid negative-duty rows downstream, which requires seeing the true sign. 11 of 2,999 written rows (≈0.4%) were removed at this stage for a negative reboiler duty.
+- **feed_stage sampling:** seven of the eight inputs (feed temperature, feed pressure, feed composition, reflux ratio, bottoms withdrawal rate, feed flow, number of stages) are sampled via Latin Hypercube Sampling. `feed_stage` is the exception: because its valid range (2 to number_of_stages − 1) depends on the number_of_stages value already drawn for that row, it's instead sampled uniformly within that row-specific range after the LHS pass, rather than via a fixed-range LHS dimension.
+- **Column specification keys:** the automation code sets bottoms withdrawal rate via column spec key `"R"` and reflux ratio via `"C"` — these are the spec-dictionary keys exposed by the DWSIM version and flowsheet configuration used for this submission. If you open the flowsheet in a different DWSIM version and these keys have changed, the program fails with an explicit "specification key not found" error listing the actually-available keys, rather than failing silently.
+- **Physical validity bounds** applied during preprocessing and model auditing: xD, xB ∈ [0, 1) (mole fractions); QC, QR ≥ 0 (duty magnitudes). A small numerical tolerance (±0.02) is allowed on model predictions (not raw simulation data) for the purity bounds, since unconstrained regressors can make small boundary crossings; a model is disqualified if more than 0.5% of its test-set predictions violate this tolerance.
+- Feed vapor phase mole fraction and column pressure (listed as optional additional variables in the original task brief) were not included as separate sampled inputs; column pressure is governed by the sampled feed pressure, and feed phase is determined by DWSIM's own flash calculation at the sampled feed temperature/pressure/composition rather than being manually specified.
