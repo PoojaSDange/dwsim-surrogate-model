@@ -2,13 +2,19 @@
 
 Machine learning surrogate models trained to replace expensive DWSIM process simulations for a Benzene–Toluene binary distillation column. The project automates dataset generation across varied operating conditions and benchmarks four model classes to predict four process outputs (distillate purity, bottoms purity, condenser duty, reboiler duty) — selecting the best model **independently for each output** rather than assuming one model fits all targets equally well.
 
-## Why this project is more than "train a regression model"
+## Model selection criteria
 
-Running a full DWSIM simulation for every operating condition is slow. The goal here is to train a fast ML surrogate that approximates DWSIM's output well enough to use for optimization/exploration without running the actual simulator every time.
+Candidate models were evaluated on two criteria: standard error metrics 
+(RMSE, MAE, R²) and physical validity of predictions.
 
-The interesting engineering problem showed up *after* the models were trained: **accuracy-only model selection was misleading.** A model could score well on standard error metrics while still producing predictions that violate basic physical constraints — for example, a purity value outside [0, 1), or a negative duty magnitude, both of which are physically meaningless for this system.
+Physical validity bounds applied per target: xD, xB ∈ [0, 1) (mole fractions); 
+QC, QR ≥ 0 (duty magnitudes). A tolerance of ±0.02 was allowed on predicted 
+purity values to account for boundary crossings from unconstrained regressors. 
+A model was disqualified for a given target if more than 0.5% of its test-set 
+predictions violated these bounds.
 
-So instead of picking the "best" model purely by lowest error, this project adds a **physical-consistency audit layer**: predictions are checked against known physical bounds, and a model is disqualified for a given target if more than 0.5% of its test-set predictions violate those bounds (with a small numerical tolerance for boundary crossings, since unconstrained regressors will sometimes land just outside a hard boundary). Only models that are both accurate *and* physically valid are selected.
+Final model selection per target was based on both criteria — lowest error 
+among models that passed the physical validity check.
 
 ## Approach
 
