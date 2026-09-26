@@ -1,0 +1,9 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="DWSIMAutomation.csproj" Id="e77fd7e9-48db-4b6c-a88c-baf39e81af61">
+    <Platform Solution="*|x64" Project="x64" />
+  </Project>
+</Solution>
